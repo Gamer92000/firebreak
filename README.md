@@ -3,10 +3,13 @@
 firebreak unlocks and roots an Echo Dot (2nd Generation), an Echo (2nd
 Generation) or an Echo Dot (3rd Generation) over USB, or returns it to stock.
 Run it again with another target to move the device. A stopped run picks up
-where it left off.
+where it left off. It also roots an Echo Dot (5th Generation), Cannoli on
+NS6575/build 8349, over a separate NAND path; see
+[the Cannoli guide](docs/cannoli.md).
 
 > [!NOTE]
-> All of this is possible because of Rortiz2's work. firebreak runs the
+> The biscuit, radar, and donut unlocks build on Rortiz2's work.
+> firebreak runs the
 > unlocks they publish on XDA, one thread for each Echo:
 >
 > - [Echo Dot (2nd Generation), biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
@@ -179,6 +182,11 @@ commands for the Echo (2nd Generation):
         boot-root.zip's root adb on Fire OS 6 8349, installed over an older
         Fire OS 6 if need be, which keeps the Echo's setup; with
         --factory-reset, Fire OS 6 8349, with the Echo erased.
+
+commands for the Echo Dot (5th Generation), Cannoli 8349:
+  unlock --device cannoli --bundle DIRECTORY --serial SERIAL --backup DIRECTORY
+      Root slot A and install TWRP in slot B. See docs/cannoli.md
+      to build the required local image bundle.
 
 Run it again with another of these to move the Echo there.
 

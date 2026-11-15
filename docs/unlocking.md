@@ -3446,3 +3446,86 @@ lost its root, so that one command covers both.
 libusb itself is never bundled: it is a native library, so a run without it
 fails on pyusb's own `NoBackendError`, which `firebreak/mediatek/libusb.py`
 turns into a message naming `brew install libusb`.
+
+### Cannoli
+
+Cannoli stores firmware in NAND UBI volumes. Its explicit
+`unlock --device cannoli` and `restore --device cannoli` routes bypass the
+GPT/eMMC plans. [The Cannoli guide](cannoli.md) gives the build and install
+commands.
+
+BL2 appears briefly as USB `0e8d:2000` at power-on. The listener must run
+before power is applied. It sends the modified U-Boot FIT with D7, checks
+the complete transfer and checksum, and sends D5 only after verification.
+The first RAM loader changes fastboot enforcement without writing a BCB.
+The host checks product, serial, and B capacities before selecting A and
+installing recovery in B. Slot-selection helpers report `cannoli-bcb-1`
+only after their BCB command succeeds. A normal reboot through BL2 starts
+Linux; direct Linux startup from the tested RAM context failed.
+
+The U-Boot FIT construction uses the unsigned `hashed-nodes` mechanism
+recorded as [CVE-2026-46728][cannoli-cve]. Original signed metadata moves
+under an archive node. An `FDT_NOP` boundary preserves the verifier's region
+stream, while the selected image holds changed code and its matching hash.
+No vendor private key is used. [The upstream fix][cannoli-fit-fix] credits
+Apple SEAR as reporter, Simon Glass as author, and Tom Rini as tester.
+The Python region model follows the [U-Boot/libfdt implementation][cannoli-regions].
+
+The recovery FIT retains the stock kernel and device tree. Its recovery
+configuration does not cover the ramdisk in its signed stream. Replacing
+that ramdisk and its ordinary hash permits source-built TWRP.
+The [TWRP builder][twrp_device_amazon_cannoli] patches add headless graphics and
+USB ADB through configfs/FunctionFS.
+
+The persistent A loader combines direct SquashFS root mounting with the
+Volume Up recovery hook. The hook's assembly is in
+[the OS builder][cannoli-os-builder] at `cannoli_os/uboot_buttons.S`.
+Its device tree enables I2C4 and adds the SDA4/SCL4 pin group with pull-ups.
+The patch table preserves the original
+988520-byte payload and 12807-byte embedded DTB allocation. Compacting that
+DTB caused boot loops; outer FIT padding alone did not repair them.
+The source tables verify each preimage and the complete patched payload.
+
+The system builder replaces adbd, removes root verity from fstab, patches
+SELinux for the root domain, and enables USB ADB. It preserves existing
+owners, modes, and SELinux xattrs. It forces the stock FOS-flags ADB-enable
+branch and neutralizes its four ADB-disable calls. Without these edits, the
+stock script can reset the persistent USB configuration to `none` during
+boot. Host authentication and OTA blocking
+follow the existing Fire OS 6 route.
+
+Before writing A, the host checks recovery identity, the 8349 TEE/SCP/MCUPM
+images, B image hashes, volume sizes, and mounts, and the final check
+verifies that both B volumes remain unchanged. Recovery checks end with a
+random marker carrying the shell status. Counts
+and hashes are checked separately so a successful hash of a truncated read
+cannot authorize a write. Backups contain all three A volumes, the installed
+B recovery volumes, and misc, with per-file sizes and SHA-256 hashes. The
+manifest is committed only after all host copies match the device. A resume
+requires the same serial and bundle and reuses the completed backup.
+
+The UBI writer resolves volume names through sysfs, rejects mounted targets,
+and uses the character-device `UBI_IOCVOLUP` operation. Removing a busy
+ubiblock mapping fails before the update begins. It compares every written
+byte with the staged image, then the host verifies the image-length hash.
+An interrupted A update can be replaced from B without treating its partial
+contents as a new backup. A failure stops subsequent writes and does not
+select A. The bootstrap replaces B before a host backup is possible; it
+cannot offer a complete return to the original factory state.
+
+TeamWin, OmniROM, AOSP, and [minimal-manifest-twrp][cannoli-manifest] provide
+recovery sources and build infrastructure. Google provides the NDK and
+emulator adbd; topjohnwu's Magisk provides `magiskpolicy`. The existing
+Firebreak and R0rt1z2 unlocks informed
+the recovery-then-root approach. Bjoern Kerler's mtkclient and 981213's
+mtk_uartboot supplied MediaTek protocol references. This route does not
+claim a BootROM or kamakiri exploit and does not use Magisk systemless root.
+Upstream source licenses and notices remain with their respective projects.
+
+[cannoli-cve]: https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/46xxx/CVE-2026-46728.json
+[cannoli-fit-fix]: https://github.com/u-boot/u-boot/commit/2092322b31cc8b1f8c9e2e238d1043ae0637b241
+[cannoli-regions]: https://android.googlesource.com/platform/external/u-boot/+/f7aa2094d4b1f8121384a030e95177327d873339/lib/libfdt/fdt_wip.c
+[cannoli-manifest]: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni
+
+[cannoli-os-builder]: https://github.com/Gamer92000/cannoli-os-builder
+[twrp_device_amazon_cannoli]: https://github.com/Gamer92000/twrp_device_amazon_cannoli

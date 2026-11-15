@@ -67,6 +67,7 @@ class Feature(enum.Enum):
     AB_SLOTS = "ab-slots"
     BOOT0 = "boot0"
     RPMB = "rpmb"
+    UBI = "ubi"
 
 
 @dataclasses.dataclass(frozen=True)

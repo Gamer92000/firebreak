@@ -18,7 +18,7 @@ import sys
 import textwrap
 from typing import TYPE_CHECKING
 
-from firebreak import __version__
+from firebreak import __version__, cannoli
 from firebreak.backup import backup
 from firebreak.cache import make_cache
 from firebreak.devices import (
@@ -29,6 +29,7 @@ from firebreak.devices import (
     TARGETS,
     biscuit,
 )
+from firebreak.devices.cannoli import CANNOLI
 from firebreak.emos import child_emos
 from firebreak.entry import (
     BOOTROM,
@@ -100,7 +101,7 @@ mtkclient, by bkerler, agrees with two of firebreak's bootrom addresses.
   https://github.com/bkerler/mtkclient
 ftvdb keeps an archive of Fire OS builds.
   https://ftvdb.com/"""
-DEVICES = {device.name: device for device in TARGETS}
+DEVICES = {device.name: device for device in (*TARGETS, CANNOLI)}
 FACTORY_RESETS = {
     name
     for targets in TARGETS.values()
@@ -114,6 +115,21 @@ RESTORE = "restore"
 SURVEY = "survey"
 UNLOCK = "unlock"
 WRITE_TEST = "write-test"
+
+
+def add_cannoli_options(parser: argparse.ArgumentParser, name: str) -> None:
+    if name in {UNLOCK, RESTORE}:
+        parser.add_argument("--bundle", help="Cannoli image bundle", type=pathlib.Path)
+        parser.add_argument("--serial", help="Cannoli USB serial")
+        parser.add_argument(
+            "--check", action="store_true", help="Cannoli read-only recovery checks"
+        )
+        if name == UNLOCK:
+            parser.add_argument(
+                "--backup",
+                help="new Cannoli host backup directory",
+                type=pathlib.Path,
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,12 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
         FASTBOOT: ["--no-update-check", "--verbose"],
         REBOOT: ["--no-update-check", "--verbose"],
         REPORT: ["--no-update-check", "--verbose"],
-        RESTORE: navigating,
+        RESTORE: [*navigating, "--device", "--end-in-fireos"],
         SHORT: ["--device", "--no-update-check", "--verbose"],
         STOCK: restoring,
         SURVEY: ["--no-update-check", "--verbose"],
         TWRP: navigating,
-        UNLOCK: rooting,
+        UNLOCK: [*rooting, "--device", "--force"],
         WRITE_TEST: ["--no-update-check", "--verbose"],
     }
     described = dict(about)
@@ -275,6 +291,7 @@ other commands:
                 for each in sorted({*uses[name], "--device"})
             ],
         )
+        add_cannoli_options(made, name)
         if name == STOCK:
             made.add_argument(
                 "build",
@@ -330,6 +347,28 @@ def builds_list() -> str:
     return "\n".join(lines)
 
 
+def cannoli_options(
+    parser: argparse.ArgumentParser, options: argparse.Namespace
+) -> bool:
+    if options.device == "cannoli":
+        if options.command not in {UNLOCK, RESTORE}:
+            parser.error(
+                "Cannoli supports unlock and restore only; see docs/cannoli.md"
+            )
+        if not options.bundle or not options.serial:
+            parser.error("Cannoli requires --bundle and --serial")
+        if options.target or options.factory_reset:
+            parser.error("Cannoli takes no TARGET or --factory-reset")
+        if options.command == UNLOCK and not options.backup and not options.check:
+            parser.error("Cannoli unlock requires --backup")
+        return True
+    if any(
+        getattr(options, name, None) for name in ("bundle", "serial", "check", "backup")
+    ):
+        parser.error("Cannoli options require --device cannoli")
+    return False
+
+
 def check_for_update() -> None:
     with contextlib.suppress(Exception):
         import update_checker  # ruff: ignore[import-outside-top-level]
@@ -382,6 +421,19 @@ def cli() -> None:
     SESSION.no_wait = options.force
     SESSION.short = options.command == SHORT
     SESSION.device = DEVICES.get(options.device)
+    if options.device == "cannoli":
+        cannoli.run(
+            backup=pathlib.Path(options.directory)
+            if options.command == RESTORE
+            else options.backup,
+            check=options.check,
+            directory=options.bundle,
+            end_in_fireos=options.end_in_fireos,
+            force=options.force,
+            restore=options.command == RESTORE,
+            serial=options.serial,
+        )
+        return
     command = {
         BACKUP: functools.partial(
             backup, directory=options.directory, force=options.force
@@ -527,10 +579,9 @@ def option_parents(*, hidden: bool = False) -> dict[str, argparse.ArgumentParser
         choices=DEVICES,
         help=argparse.SUPPRESS
         if hidden
-        else "whose test point to describe, which an Echo that shows no light"
-        " cannot say itself. Every other command reads the device from the"
-        " Echo. One of: "
-        + ", ".join(f"{device.name} for the {device.title}" for device in TARGETS),
+        else "choose cannoli for NAND unlock and restore, "
+        "or choose a device for short. "
+        "Other commands identify the connected Echo. One of: " + ", ".join(DEVICES),
     )
     return made
 
@@ -579,6 +630,10 @@ def parsed() -> argparse.Namespace:
         TWRP: {"force"},
         WRITE_TEST: set(),
     }.get(options.command, {"factory_reset"})
+    if cannoli_options(parser, options):
+        takes = {"device", "force"}
+        if options.command == RESTORE:
+            takes.add("end_in_fireos")
     for option in sorted(
         {
             "device",
@@ -687,6 +742,16 @@ def target_help() -> str:
             lines.extend(
                 "  " + line for line in listed(label=label, summary=target.summary)
             )
+    lines.extend([
+        "",
+        "commands for the Echo Dot (5th Generation), Cannoli 8349:",
+        (
+            "  unlock --device cannoli --bundle DIRECTORY "
+            "--serial SERIAL --backup DIRECTORY"
+        ),
+        "      Root slot A and install TWRP in slot B. See docs/cannoli.md",
+        "      to build the required local image bundle.",
+    ])
     return "\n".join(lines)
 
 

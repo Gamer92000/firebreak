@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from firebreak.devices import biscuit, crown, donut, radar
+from firebreak.devices import biscuit, cannoli, crown, donut, radar
 
 if TYPE_CHECKING:
     from firebreak.cache import Download
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 BY_NAME = "/dev/block/platform/mtk-msdc.0/by-name"
 LITTLE_KERNEL_DESCRIPTION = re.compile(pattern=r"[0-9a-f]{7}-\d{8}_\d{6}")
-SUPPORTED = (biscuit.CONFIG, crown.CONFIG, donut.CONFIG, radar.CONFIG)
+SUPPORTED = (biscuit.CONFIG, cannoli.CONFIG, crown.CONFIG, donut.CONFIG, radar.CONFIG)
 ADB_OFF_BUILDS: dict[Device, frozenset[str]] = {
     config.device: config.adb_off_builds for config in SUPPORTED
 }

@@ -7,9 +7,12 @@ coverage.json
 .pytest_cache/
 .ruff_cache/
 .tox/
-.venv/
+.venv*/
 __pycache__/
 build/
 dist/
 htmlcov/
 uv.lock
+
+/work/
+/backups/
