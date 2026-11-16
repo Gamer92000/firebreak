@@ -60,9 +60,10 @@ class Device:
     def unmounted(self, volumes: dict[str, ubi.Volume]) -> None:
         self.actions.append(("unmounted", set(volumes)))
 
-    def write(
-        self, volume: ubi.Volume, image: pathlib.Path, _helper: pathlib.Path
-    ) -> None:
+    def stage_helper(self, _helper: pathlib.Path) -> None:
+        self.actions.append("stage_helper")
+
+    def write(self, volume: ubi.Volume, image: pathlib.Path) -> None:
         self.actions.append(("write", volume.name))
         if self.failed == volume.name:
             raise FatalError(message="interrupted write")
@@ -303,7 +304,7 @@ def test_initial_staging_checks_all_capacities_before_writing(
     def check() -> None:
         count[0] += 1
         if count[0] == 1:
-            raise FatalError(message="not recovery")
+            raise FatalError(message="Boot Cannoli slot B TWRP first")
 
     device.check = check
     cannoli.start_recovery(bundle, link, device)
@@ -509,6 +510,43 @@ def test_wait_recovery_has_deadline(
     monkeypatch.setattr(cannoli.time, "sleep", lambda _: None)
     with pytest.raises(FatalError, match="did not answer"):
         cannoli.wait_recovery(device)
+
+
+def test_partial_b_flash_keeps_bcb_on_a(
+    bundle: cannoli.Bundle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device, link = Device(bundle), Link()
+    count = [0]
+
+    def check() -> None:
+        count[0] += 1
+        if count[0] == 1:
+            raise FatalError(message="Boot Cannoli slot B TWRP first")
+
+    device.check = check
+
+    original_fastboot = link.fastboot
+
+    def failing_fastboot(*args: object) -> None:
+        original_fastboot(*args)
+        if args[:2] == ("flash", "uboot_b"):
+            raise FatalError(message="fastboot flash failed")
+
+    link.fastboot = failing_fastboot
+
+    with pytest.raises(FatalError, match="fastboot flash failed"):
+        cannoli.start_recovery(bundle, link, device)
+
+    assert ("flash", "boot_b", str(bundle.image("boot_b"))) in link.actions
+    assert ("ram", "select-a", "cannoli-bcb-1") in link.actions
+    bcb_index = link.actions.index(("ram", "select-a", "cannoli-bcb-1"))
+    flash_boot_index = next(
+        i for i, a in enumerate(link.actions) if a[:2] == ("flash", "boot_b")
+    )
+    assert bcb_index < flash_boot_index
+    assert not any(action[:2] == ("ram", "select-b") for action in link.actions)
+    assert ("reboot",) not in link.actions
 
 
 def test_write_failure_never_selects_a(

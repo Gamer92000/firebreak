@@ -228,7 +228,9 @@ def run(  # ruff: ignore[too-many-arguments]
         )
     confirm(
         force=force,
-        what="replace Cannoli slot A, install TWRP in slot B, "
+        what="restore Cannoli slot A from backup and change boot selection"
+        if restore
+        else "replace Cannoli slot A, install TWRP in slot B, "
         "and change boot selection",
     )
     start_recovery(bundle, transport, recovery)
@@ -244,10 +246,11 @@ def run(  # ruff: ignore[too-many-arguments]
             )
     else:
         recovery.backup(backup, volumes, bundle.checksum)
+    recovery.stage_helper(bundle.image("ubivol"))
     for name in A_VOLUMES:
         image = backup / (name + ".bin") if restore else bundle.image(name)
         passed(message="Writing and verifying " + name)
-        recovery.write(volumes[name], image, bundle.image("ubivol"))
+        recovery.write(volumes[name], image)
     current = recovery.volumes()
     for name, checksum in protected.items():
         require(
@@ -285,7 +288,13 @@ def run(  # ruff: ignore[too-many-arguments]
 def start_recovery(bundle: Bundle, transport: Transport, recovery: Recovery) -> None:
     try:
         recovery.check()
-    except FatalError:
+    except FatalError as error:
+        if error.message not in {
+            "Boot Cannoli slot B TWRP first",
+            "Cannoli ADB operation failed; "
+            "inspect the device before retrying",
+        }:
+            raise
         transport.ram(bundle.image("access"), "cannoli")
         for name in B_VOLUMES:
             value = transport.variable("partition-size:" + name)
@@ -300,6 +309,8 @@ def start_recovery(bundle: Bundle, transport: Transport, recovery: Recovery) -> 
         for name in B_VOLUMES:
             transport.fastboot("flash", name, str(bundle.image(name)))
             passed(message=f"Recovery {name} installed")
+        # No host-side readback: fastboot has no read-partition command,
+        # so B is verified after reboot via remote_digest in preflight.
     else:
         preflight(bundle, recovery)
     transport.ram(bundle.image("select-b"), "cannoli-bcb-1")

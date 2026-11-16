@@ -135,9 +135,12 @@ class Recovery:
             0 < count <= volume.used and not volume.updating,
             "Volume has no complete data to verify",
         )
-        prefix = f"head -c {count} {volume.node}"
-        require(self.shell(prefix + " | wc -c") == str(count), "Truncated UBI read")
-        words = self.shell(prefix + " | sha256sum").split()
+        verify = "/tmp/firebreak-verify"
+        self.shell(f"head -c {count} {volume.node} > {verify}")
+        output = self.shell(f"wc -c < {verify}; sha256sum < {verify}; rm {verify}")
+        lines = output.splitlines()
+        require(len(lines) == 2 and lines[0].strip() == str(count), "Truncated UBI read")
+        words = lines[1].split()
         value = words[0] if words else ""
         require(bool(re.fullmatch(r"[a-f0-9]{64}", value)), "Invalid recovery checksum")
         return value
@@ -208,13 +211,15 @@ class Recovery:
         )
         return volumes
 
-    def write(self, volume: Volume, image: pathlib.Path, helper: pathlib.Path) -> None:
+    def stage_helper(self, helper: pathlib.Path) -> None:
+        self.push(helper, REMOTE_HELPER)
+        self.shell("chmod 700 /tmp/firebreak-ubivol")
+
+    def write(self, volume: Volume, image: pathlib.Path) -> None:
         require(
             0 < image.stat().st_size <= volume.capacity, "Image exceeds UBI capacity"
         )
         self.unmounted({volume.name: volume})
-        self.push(helper, REMOTE_HELPER)
-        self.shell("chmod 700 /tmp/firebreak-ubivol")
         self.push(image, REMOTE_IMAGE)
         args = f"{volume.node} {volume.name} /tmp/firebreak-image"
         self.shell(REMOTE_HELPER + " check " + args)

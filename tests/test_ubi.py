@@ -179,16 +179,24 @@ def test_remote_hash_checks_count_and_update_marker(
     monkeypatch.setattr(
         recovery,
         "shell",
-        lambda command: "4" if "wc -c" in command else "a" * 64 + "  -",
+        lambda command: "" if "head -c" in command and ">" in command
+        else f"4\n{'a' * 64}  -",
     )
     assert recovery.remote_digest(volume) == "a" * 64
     with pytest.raises(FatalError):
         recovery.remote_digest(volume, 101)
-    monkeypatch.setattr(recovery, "shell", lambda _: "3")
+    monkeypatch.setattr(
+        recovery,
+        "shell",
+        lambda command: "" if "head -c" in command and ">" in command else "3\nbad",
+    )
     with pytest.raises(FatalError, match="Truncated"):
         recovery.remote_digest(volume)
     monkeypatch.setattr(
-        recovery, "shell", lambda command: "4" if "wc -c" in command else "not-a-hash"
+        recovery,
+        "shell",
+        lambda command: "" if "head -c" in command and ">" in command
+        else f"4\nnot-a-hash",
     )
     with pytest.raises(FatalError, match="checksum"):
         recovery.remote_digest(volume)
@@ -252,14 +260,14 @@ def test_write_stages_and_verifies_image(
     )
     monkeypatch.setattr(recovery, "volumes", inventory)
     monkeypatch.setattr(recovery, "remote_digest", lambda *_args: ubi.digest(image))
-    recovery.write(inventory()["system_a"], image, image)
+    recovery.write(inventory()["system_a"], image)
     assert any(
         isinstance(command, str) and " write /dev/ubi0_0 system_a " in command
         for command in calls
     )
     monkeypatch.setattr(recovery, "remote_digest", lambda *_args: "bad")
     with pytest.raises(FatalError, match="readback"):
-        recovery.write(inventory()["system_a"], image, image)
+        recovery.write(inventory()["system_a"], image)
     monkeypatch.setattr(recovery, "shell", lambda _: "wrong")
     with pytest.raises(FatalError, match="staging"):
         recovery.push(image, "/tmp/image")
