@@ -114,16 +114,23 @@ REPORT = "report"
 RESTORE = "restore"
 SURVEY = "survey"
 UNLOCK = "unlock"
+UPGRADE = "cannoli-upgrade"
 WRITE_TEST = "write-test"
 
 
 def add_cannoli_options(parser: argparse.ArgumentParser, name: str) -> None:
-    if name in {UNLOCK, RESTORE}:
+    if name in {UNLOCK, RESTORE, UPGRADE}:
         parser.add_argument("--bundle", help="Cannoli image bundle", type=pathlib.Path)
         parser.add_argument("--serial", help="Cannoli USB serial")
         parser.add_argument(
             "--check", action="store_true", help="Cannoli read-only recovery checks"
         )
+        if name == UPGRADE:
+            parser.add_argument(
+                "--ota-parts",
+                help="unpacked 8349 OTA parts directory (payload_dump.py)",
+                type=pathlib.Path,
+            )
         if name == UNLOCK:
             parser.add_argument(
                 "--backup",
@@ -174,6 +181,14 @@ def build_parser() -> argparse.ArgumentParser:
         " erases it, so that one is asked about.",
         UNLOCK: "unlock the Echo and root it, to TARGET or to the newest Fire OS"
         " firebreak supports when TARGET is left out.",
+        UPGRADE: "bring a factory Echo Dot (5th Generation) that still runs the"
+        " 2022 launch firmware up to the 8349 volumes the Cannoli unlock"
+        " requires. It checks each OTA part — the TEE, SCP, MCUPM and boot"
+        " parts against the pins the install checks, the system and U-Boot"
+        " parts for size and format — writes the nine stock volumes with"
+        " readback verification, and asks first: the first 8349 TEE boot burns"
+        " the anti-rollback eFuse, which is one-way. It needs the Cannoli"
+        " bundle, its USB serial and the unpacked 8349 OTA parts.",
         WRITE_TEST: f"write a known pattern over the Echo's {EMMC_TARGET}"
         " partition and read it back, which tells a failing eMMC from a failing"
         " USB cable because nothing crosses USB. It leaves a fresh empty"
@@ -210,6 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         SURVEY: ["--no-update-check", "--verbose"],
         TWRP: navigating,
         UNLOCK: [*rooting, "--device", "--force"],
+        UPGRADE: ["--device", "--force", "--no-update-check", "--verbose"],
         WRITE_TEST: ["--no-update-check", "--verbose"],
     }
     described = dict(about)
@@ -351,9 +367,10 @@ def cannoli_options(
     parser: argparse.ArgumentParser, options: argparse.Namespace
 ) -> bool:
     if options.device == "cannoli":
-        if options.command not in {UNLOCK, RESTORE}:
+        if options.command not in {UNLOCK, RESTORE, UPGRADE}:
             parser.error(
-                "Cannoli supports unlock and restore only; see docs/cannoli.md"
+                "Cannoli supports unlock, restore and cannoli-upgrade only;"
+                " see docs/cannoli.md"
             )
         if not options.bundle or not options.serial:
             parser.error("Cannoli requires --bundle and --serial")
@@ -361,12 +378,38 @@ def cannoli_options(
             parser.error("Cannoli takes no TARGET or --factory-reset")
         if options.command == UNLOCK and not options.backup and not options.check:
             parser.error("Cannoli unlock requires --backup")
+        if options.command == UPGRADE and not options.ota_parts:
+            parser.error("cannoli-upgrade requires --ota-parts")
         return True
     if any(
-        getattr(options, name, None) for name in ("bundle", "serial", "check", "backup")
+        getattr(options, name, None)
+        for name in ("bundle", "check", "ota_parts", "serial", "backup")
     ):
         parser.error("Cannoli options require --device cannoli")
     return False
+
+
+def cannoli_run(options: argparse.Namespace) -> None:
+    if options.command == UPGRADE:
+        cannoli.upgrade_prerequisites(
+            check=options.check,
+            directory=options.bundle,
+            force=options.force,
+            ota=options.ota_parts,
+            serial=options.serial,
+        )
+    else:
+        cannoli.run(
+            backup=pathlib.Path(options.directory)
+            if options.command == RESTORE
+            else options.backup,
+            check=options.check,
+            directory=options.bundle,
+            end_in_fireos=options.end_in_fireos,
+            force=options.force,
+            restore=options.command == RESTORE,
+            serial=options.serial,
+        )
 
 
 def check_for_update() -> None:
@@ -422,17 +465,7 @@ def cli() -> None:
     SESSION.short = options.command == SHORT
     SESSION.device = DEVICES.get(options.device)
     if options.device == "cannoli":
-        cannoli.run(
-            backup=pathlib.Path(options.directory)
-            if options.command == RESTORE
-            else options.backup,
-            check=options.check,
-            directory=options.bundle,
-            end_in_fireos=options.end_in_fireos,
-            force=options.force,
-            restore=options.command == RESTORE,
-            serial=options.serial,
-        )
+        cannoli_run(options)
         return
     command = {
         BACKUP: functools.partial(
@@ -474,6 +507,14 @@ def fireos_version(*, build: str, name: str) -> str:
     if found is None:
         return build.partition("-")[0]
     return ".".join(digit for digit in found.groups() if digit)
+
+
+def imply_cannoli(parser: argparse.ArgumentParser, options: argparse.Namespace) -> None:
+    if options.command != UPGRADE:
+        return
+    if options.device not in {None, "cannoli"}:
+        parser.error("cannoli-upgrade takes only --device cannoli")
+    options.device = "cannoli"
 
 
 def leave(*, status: object) -> None:
@@ -579,7 +620,7 @@ def option_parents(*, hidden: bool = False) -> dict[str, argparse.ArgumentParser
         choices=DEVICES,
         help=argparse.SUPPRESS
         if hidden
-        else "choose cannoli for NAND unlock and restore, "
+        else "choose cannoli for its NAND route, "
         "or choose a device for short. "
         "Other commands identify the connected Echo. One of: " + ", ".join(DEVICES),
     )
@@ -610,10 +651,12 @@ def parsed() -> argparse.Namespace:
         ("force", False),
         ("no_update_check", False),
         ("no_wait", False),
+        ("ota_parts", None),
         ("target", None),
         ("verbose", False),
     ):
         setattr(options, option, getattr(options, option, None) or default)
+    imply_cannoli(parser, options)
     if options.command is None:
         parser.print_help()
         sys.exit(1)

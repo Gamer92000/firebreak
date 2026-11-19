@@ -54,6 +54,28 @@ PREREQUISITES = {
     ),
 }
 STOCK_BOOT = "548dd73848cfcc76cb921ec5d8c68438c95886f4fc7187da9fa5f4b7efb8b201"
+UPGRADE_ORDER = (
+    "system_a",
+    "boot_a",
+    "uboot_a",
+    "mcupm_a",
+    "mcupm_b",
+    "scp_a",
+    "scp_b",
+    "tee1",
+    "tee2",
+)
+UPGRADE_PARTS = {
+    "boot_a": "boot.img",
+    "mcupm_a": "mcupm.img",
+    "mcupm_b": "mcupm.img",
+    "scp_a": "scp.img",
+    "scp_b": "scp.img",
+    "system_a": "system.img",
+    "tee1": "tee1.img",
+    "tee2": "tee2.img",
+    "uboot_a": "uboot.img",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,6 +137,15 @@ class Transport:
         return found[1]
 
 
+def carries_8349(recovery: Recovery, volume: Volume) -> bool:
+    size, checksum = PREREQUISITES[volume.name]
+    return (
+        not volume.updating
+        and volume.used >= size
+        and recovery.remote_digest(volume, size) == checksum
+    )
+
+
 def load_bundle(directory: pathlib.Path, serial: str) -> Bundle:
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         path = directory / "bundle.json"
@@ -126,6 +157,10 @@ def load_bundle(directory: pathlib.Path, serial: str) -> Bundle:
             and manifest["build"] == "NS6575/8349"
             and manifest["serial"] == serial,
             "Bundle is not for this Cannoli serial and build",
+        )
+        require(
+            manifest.get("adb") == "keyless",
+            "Bundle predates keyless ADB; rebuild it with a current OS builder",
         )
         require(set(manifest["images"]) == set(LIMITS), "Bundle image set differs")
         bundle = Bundle(directory, serial, digest(path))
@@ -179,7 +214,9 @@ def preflight(bundle: Bundle, recovery: Recovery) -> dict[str, Volume]:
     for name, (size, checksum) in PREREQUISITES.items():
         require(
             recovery.remote_digest(volumes[name], size) == checksum,
-            "Unsupported firmware prerequisite: " + name,
+            "Unsupported firmware prerequisite: "
+            + name
+            + "; cannoli-upgrade brings a 2022 unit up to 8349",
         )
     for name in B_VOLUMES:
         image = bundle.image(name)
@@ -195,6 +232,22 @@ def preflight(bundle: Bundle, recovery: Recovery) -> dict[str, Volume]:
         )
     recovery.unmounted({name: volumes[name] for name in A_VOLUMES})
     return volumes
+
+
+def resolve_upgrade_parts(ota: pathlib.Path) -> dict[str, pathlib.Path]:
+    require(
+        bool(ota.is_dir() and not ota.is_symlink()),
+        "Use the unpacked 8349 OTA parts directory",
+    )
+    parts = {}
+    for name, file in UPGRADE_PARTS.items():
+        image = ota / file
+        require(
+            bool(image.is_file() and not image.is_symlink()),
+            "OTA part missing or not a regular file: " + file,
+        )
+        parts[name] = image
+    return parts
 
 
 def run(  # ruff: ignore[too-many-arguments]
@@ -274,8 +327,9 @@ def run(  # ruff: ignore[too-many-arguments]
         recovery.shell("getprop ro.boot.slot_suffix") == "_a", "Slot A did not boot"
     )
     require(
-        recovery.shell("getprop ro.adb.secure") == "1",
-        "ADB host authentication is not enabled",
+        recovery.shell("getprop ro.adb.secure") == "0",
+        "ADB authentication is still enabled; rebuild the bundle with a "
+        "current OS builder",
     )
     require(recovery.shell("id -u") == "0", "Slot A did not provide root ADB")
     require(recovery.shell("getenforce") == "Enforcing", "Expected SELinux enforcing")
@@ -291,8 +345,7 @@ def start_recovery(bundle: Bundle, transport: Transport, recovery: Recovery) -> 
     except FatalError as error:
         if error.message not in {
             "Boot Cannoli slot B TWRP first",
-            "Cannoli ADB operation failed; "
-            "inspect the device before retrying",
+            "Cannoli ADB operation failed; inspect the device before retrying",
         }:
             raise
         transport.ram(bundle.image("access"), "cannoli")
@@ -317,6 +370,101 @@ def start_recovery(bundle: Bundle, transport: Transport, recovery: Recovery) -> 
     transport.fastboot("reboot")
     say(text="Waiting for slot B TWRP")
     wait_recovery(recovery)
+
+
+def upgrade_prerequisites(
+    *,
+    check: bool,
+    directory: pathlib.Path,
+    force: bool,
+    ota: pathlib.Path,
+    serial: str,
+) -> None:
+    bundle = load_bundle(directory, serial)
+    parts = resolve_upgrade_parts(ota)
+    verify_upgrade_parts(parts)
+    recovery = Recovery(serial)
+    recovery.check()
+    volumes = recovery.volumes()
+    require(
+        set(UPGRADE_PARTS) <= set(volumes),
+        "8349 upgrade volumes are missing on this unit",
+    )
+    for name, image in parts.items():
+        require(
+            image.stat().st_size <= volumes[name].capacity,
+            "OTA part exceeds its volume: " + name,
+        )
+    recovery.unmounted({name: volumes[name] for name in UPGRADE_PARTS})
+    say(text="Reading the device's protected volumes")
+    stale = [
+        name for name in PREREQUISITES if not carries_8349(recovery, volumes[name])
+    ]
+    if check:
+        for name in sorted(PREREQUISITES):
+            say(
+                text=name + ": " + ("2022 launch firmware" if name in stale else "8349")
+            )
+        passed(
+            message=str(len(stale))
+            + " of "
+            + str(len(PREREQUISITES))
+            + " volumes need cannoli-upgrade; no writes performed"
+        )
+        return
+    require(
+        bool(stale),
+        "Device already carries the 8349 prerequisite volumes; rerun the"
+        " Cannoli install, which rewrites slot A",
+    )
+    confirm(
+        force=force,
+        what="upgrade nine Cannoli volumes to stock 8349 — one-way: the "
+        "first 8349 TEE boot burns the anti-rollback eFuse",
+    )
+    recovery.stage_helper(bundle.image("ubivol"))
+    for name in UPGRADE_ORDER:
+        passed(message="Writing and verifying " + name)
+        recovery.write(volumes[name], parts[name])
+    say(text="Re-reading the protected volumes")
+    current = recovery.volumes()
+    for name in PREREQUISITES:
+        require(
+            carries_8349(recovery, current[name]),
+            "Prerequisite volume still differs: " + name,
+        )
+    passed(
+        message="Prerequisites upgraded; see the guide's factory-unit section"
+        " for the brhgptlk step, then rerun the Cannoli install"
+    )
+
+
+def verify_upgrade_parts(parts: dict[str, pathlib.Path]) -> None:
+    pins = {
+        **PREREQUISITES,
+        "mcupm_b": PREREQUISITES["mcupm_a"],
+        "scp_b": PREREQUISITES["scp_a"],
+    }
+    for name, image in parts.items():
+        if name in pins:
+            require(
+                (image.stat().st_size, digest(image)) == pins[name],
+                "OTA part differs from the pinned 8349 image: " + image.name,
+            )
+        elif name == "boot_a":
+            require(
+                digest(image) == STOCK_BOOT,
+                "OTA boot.img differs from the pinned 8349 boot image",
+            )
+        else:
+            with image.open("rb") as source:
+                magic = source.read(4)
+            require(
+                0 < image.stat().st_size <= LIMITS[name]
+                and magic == (b"hsqs" if name == "system_a" else b"\xd0\x0d\xfe\xed"),
+                "OTA part is not a stock 8349 image: " + image.name,
+            )
+            say(text=image.name + " is not pinned; size and format checked only")
 
 
 def wait_recovery(recovery: Recovery) -> None:

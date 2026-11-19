@@ -467,3 +467,13 @@ wear. Running `report` once on one would fill this in, as it did for radar.
   sector of radar's `FJ25AB` Echo, on an eMMC of 7634944 sectors. It is the
   kit's table rather than one read off a donut, so it says
   what the kit would write and not what a donut carries.
+
+## cannoli
+
+The Echo Dot (5th Generation), whose OTAs give `ro.product.model` as
+`C2N6L4`. The one OTA on its FTVDB record is NS6575/8349, Fire OS 6.5.7.5,
+dated 2026-10-27. Its firmware lives in NAND UBI volumes, so it takes none
+of this repository's eMMC routes and no `survey`: two separate builder
+repositories produce its recovery and bundle, and `unlock --device cannoli`
+installs them. [cannoli.md](cannoli.md) is its guide, and the 2022 launch
+firmware a factory unit may carry has its own section there.

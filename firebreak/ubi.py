@@ -135,12 +135,14 @@ class Recovery:
             0 < count <= volume.used and not volume.updating,
             "Volume has no complete data to verify",
         )
-        verify = "/tmp/firebreak-verify"
-        self.shell(f"head -c {count} {volume.node} > {verify}")
-        output = self.shell(f"wc -c < {verify}; sha256sum < {verify}; rm {verify}")
-        lines = output.splitlines()
-        require(len(lines) == 2 and lines[0].strip() == str(count), "Truncated UBI read")
-        words = lines[1].split()
+        output = self.shell(
+            "set -o pipefail; "
+            f"head -c {count} {volume.node} | wc -c; "
+            f"head -c {count} {volume.node} | sha256sum"
+        )
+        counted, found, hashed = output.partition("\n")
+        require(found and counted.strip() == str(count), "Truncated UBI read")
+        words = hashed.split()
         value = words[0] if words else ""
         require(bool(re.fullmatch(r"[a-f0-9]{64}", value)), "Invalid recovery checksum")
         return value
@@ -161,6 +163,10 @@ class Recovery:
             "Recovery command failed or its response was truncated",
         )
         return body.strip()
+
+    def stage_helper(self, helper: pathlib.Path) -> None:
+        self.push(helper, REMOTE_HELPER)
+        self.shell("chmod 700 /tmp/firebreak-ubivol")
 
     def unmounted(self, volumes: dict[str, Volume]) -> None:
         mounts = self.shell("cat /proc/mounts").splitlines()
@@ -210,10 +216,6 @@ class Recovery:
             "Required Cannoli volumes are missing",
         )
         return volumes
-
-    def stage_helper(self, helper: pathlib.Path) -> None:
-        self.push(helper, REMOTE_HELPER)
-        self.shell("chmod 700 /tmp/firebreak-ubivol")
 
     def write(self, volume: Volume, image: pathlib.Path) -> None:
         require(

@@ -65,8 +65,7 @@ through [FTVDB's Cannoli NS6575/8349 record][firmware] and verify pinned
 SHA-256 hashes. No firmware binaries are included in these repositories.
 
 Use the same USB serial for recovery packaging, OS building and installation.
-The OS builder embeds this host's public ADB key; keep the private key on the
-host. Once the bundle is built, set these variables in the Firebreak shell:
+Once the bundle is built, set these variables in the Firebreak shell:
 
 ```sh
 CANNOLI_SERIAL=REPLACE_WITH_USB_SERIAL
@@ -75,6 +74,7 @@ CANNOLI_BUNDLE=/absolute/path/to/cannoli-os-builder/work/bundle
 
 [twrp-builder]: https://github.com/Gamer92000/twrp_device_amazon_cannoli
 [os-builder]: https://github.com/Gamer92000/cannoli-os-builder
+[eda]: https://github.com/Gamer92000/echo-dot-assist/blob/main/devices/cannoli/README.md
 [firmware]: https://ftvdb.com/echo/firmware/com.amazon.cannoli.android.os/0bf96b3cd8fca30fdd12f61208e44d76-13323246980-fire-os-6-5-7-5-ns6575-8349-2026-10-27/
 
 ## Install recovery and root
@@ -99,12 +99,41 @@ Before writing A, Firebreak checks the recovery, the B images, and the
 host backup, and readback-verifies every write; the full check list is in
 [the implementation notes](unlocking.md#cannoli).
 
-On slot A, ADB listens on USB only and requires a key already authorized on
-the device or the bundle's embedded public key. SELinux stays enforcing,
+On slot A, ADB is a root shell that asks for no key, and its network
+listener stays off by default; the Echo Dot Assist port's firewall gate can
+open ADB over Wi-Fi on request. Bundles from an OS builder before `74903ad`
+embedded the build host's public key instead, and the installer refuses
+them before writing; rebuild them. SELinux stays enforcing,
 with only the root `su` domain permissive; the system disables OTA
 autostart and blocks the upstream Firebreak OTA host list.
 
-Slot B provides TWRP's root USB recovery shell without host-key authentication.
+Slot B provides TWRP's root USB recovery shell.
+
+## A factory unit on 2022 launch firmware
+
+The installer refuses a unit that still runs the 2022 launch firmware with
+`Unsupported firmware prerequisite:` naming a protected volume. Its `tee`,
+`scp` and `mcupm` volumes predate the 8349 set this route is validated on.
+Recovery is already installed in slot B when this check fails, so upgrade
+from there and run the install again: unpack the pinned 8349 stock OTA (its
+parts directory: `tee1.img`, `tee2.img`, `scp.img`, `mcupm.img`,
+`boot.img`, `uboot.img`, `system.img`) and, from the Firebreak checkout:
+
+```sh
+uv run firebreak cannoli-upgrade --device cannoli \
+  --bundle "$CANNOLI_BUNDLE" --serial "$CANNOLI_SERIAL" \
+  --ota-parts /absolute/path/to/unpacked-8349-ota
+```
+
+It checks the TEE, SCP, MCUPM and boot parts against pinned hashes and the
+system and U-Boot parts for size and format, refuses a unit that already
+carries the 8349 volumes, and re-reads the protected volumes after writing.
+
+That upgrade is one-way: the first 8349 TEE boot burns the anti-rollback
+eFuse, and the 2022 firmware cannot return. An Amazon OTA to 8349 makes the
+same commitment. The launch BL2 also never starts the 8349 SCP, which leaves
+the light ring dark or swirling; flash the four `brhgptlk` raw-MTD partitions
+from the same OTA as [Echo Dot Assist's Cannoli notes][eda] describe.
 
 ## Check or resume an installation
 

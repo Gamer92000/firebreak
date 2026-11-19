@@ -3491,18 +3491,28 @@ SELinux for the root domain, and enables USB ADB. It preserves existing
 owners, modes, and SELinux xattrs. It forces the stock FOS-flags ADB-enable
 branch and neutralizes its four ADB-disable calls. Without these edits, the
 stock script can reset the persistent USB configuration to `none` during
-boot. Host authentication and OTA blocking
-follow the existing Fire OS 6 route.
+boot. ADB on rooted slot A asks for no host key — an OS builder before
+`74903ad` baked the build host's public key in instead — and OTA blocking
+follows the existing Fire OS 6 route.
 
 Before writing A, the host checks recovery identity, the 8349 TEE/SCP/MCUPM
 images, B image hashes, volume sizes, and mounts, and the final check
 verifies that both B volumes remain unchanged. Recovery checks end with a
 random marker carrying the shell status. Counts
 and hashes are checked separately so a successful hash of a truncated read
-cannot authorize a write. Backups contain all three A volumes, the installed
+cannot authorize a write; both stream straight off the volume under
+pipefail, because staging a full-size copy in recovery's tmpfs, beside the
+pushed image, OOMed TWRP when the 125 MB system_a was verified. Backups
+contain all three A volumes, the installed
 B recovery volumes, and misc, with per-file sizes and SHA-256 hashes. The
 manifest is committed only after all host copies match the device. A resume
 requires the same serial and bundle and reuses the completed backup.
+
+`cannoli-upgrade`, for a factory unit on the 2022 launch firmware, writes
+the stock volumes in an order that keeps the unit recoverable as long as it
+can: slot A first — the install rewrites those from the bundle anyway —
+then the co-processor volumes, and the TEE pair last, because the first
+8349 TEE boot burns the anti-rollback eFuse.
 
 The UBI writer resolves volume names through sysfs, rejects mounted targets,
 and uses the character-device `UBI_IOCVOLUP` operation. Removing a busy

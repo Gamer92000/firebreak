@@ -228,6 +228,15 @@ other commands:
   builds
       list every build `stock` takes for each Echo, newest first, with its
       Fire OS version. It needs no Echo.
+  cannoli-upgrade
+      bring a factory Echo Dot (5th Generation) that still runs the 2022
+      launch firmware up to the 8349 volumes the Cannoli unlock requires.
+      It checks each OTA part — the TEE, SCP, MCUPM and boot parts against
+      the pins the install checks, the system and U-Boot parts for size
+      and format — writes the nine stock volumes with readback
+      verification, and asks first: the first 8349 TEE boot burns the
+      anti-rollback eFuse, which is one-way. It needs the Cannoli bundle,
+      its USB serial and the unpacked 8349 OTA parts.
   report
       print what the Echo and this computer are, and the Echo's partition
       table, for a support request. It starts the Echo's recovery to read

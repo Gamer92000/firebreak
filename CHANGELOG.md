@@ -4,6 +4,19 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Added
+
+- `unlock --device cannoli` roots an Echo Dot (5th Generation) on
+  NS6575/8349: it installs headless TWRP into slot B over the preloader's
+  USB route, backs up slot A, writes rooted stock Fire OS with readback
+  verification, and checks the booted system for keyless root adb, SELinux
+  enforcing and no ADB network listener. Volume Up at power-on enters the
+  recovery, and `restore` returns slot A from the backup. The bundle comes
+  from two separate builder repositories; one that still embeds a host adb
+  key is refused before anything is written. `cannoli-upgrade` brings a
+  factory unit on the 2022 launch firmware up to the 8349 volumes first. The
+  guide, `docs/cannoli.md`, also covers Windows hosts.
+
 ### Fixed
 
 - `unlock fireos5` asked for the fastboot gesture when the rooted Fire OS 5 it

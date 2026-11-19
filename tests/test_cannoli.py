@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import types
@@ -22,7 +23,7 @@ class Device:
     def shell(command: str) -> str:
         return {
             "getenforce": "Enforcing",
-            "getprop ro.adb.secure": "1",
+            "getprop ro.adb.secure": "0",
             "getprop ro.boot.slot_suffix": "_a",
             "getprop ro.product.device": "cannoli",
             "getprop service.adb.tcp.port": "-1",
@@ -33,7 +34,12 @@ class Device:
     def volumes() -> dict[str, ubi.Volume]:
         return {
             name: ubi.Volume(name, f"/dev/ubi0_{index}", 2000000, 2000000, 0)
-            for index, name in enumerate((*ubi.BACKUP_VOLUMES, *cannoli.PREREQUISITES))
+            for index, name in enumerate((
+                *ubi.BACKUP_VOLUMES,
+                *cannoli.PREREQUISITES,
+                "mcupm_b",
+                "scp_b",
+            ))
         }
 
     def __init__(self, bundle: cannoli.Bundle) -> None:
@@ -57,11 +63,11 @@ class Device:
             return cannoli.PREREQUISITES[volume.name][1]
         return ubi.digest(self.bundle.image(volume.name))
 
-    def unmounted(self, volumes: dict[str, ubi.Volume]) -> None:
-        self.actions.append(("unmounted", set(volumes)))
-
     def stage_helper(self, _helper: pathlib.Path) -> None:
         self.actions.append("stage_helper")
+
+    def unmounted(self, volumes: dict[str, ubi.Volume]) -> None:
+        self.actions.append(("unmounted", set(volumes)))
 
     def write(self, volume: ubi.Volume, image: pathlib.Path) -> None:
         self.actions.append(("write", volume.name))
@@ -90,6 +96,7 @@ def bundle(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> cannoli.B
     directory = tmp_path / "bundle"
     directory.mkdir()
     manifest = {
+        "adb": "keyless",
         "build": "NS6575/8349",
         "format": 1,
         "images": {},
@@ -132,10 +139,41 @@ def invoke(bundle: cannoli.Bundle, tmp_path: pathlib.Path, **kwargs: object) -> 
     )
 
 
+def invoke_upgrade(
+    bundle: cannoli.Bundle,
+    ota: pathlib.Path,
+    *,
+    check: bool = False,
+    force: bool = True,
+    serial: str = SERIAL,
+) -> None:
+    cannoli.upgrade_prerequisites(
+        check=check,
+        directory=bundle.directory,
+        force=force,
+        ota=ota,
+        serial=serial,
+    )
+
+
+def on_2022_firmware(device: Device, monkeypatch: pytest.MonkeyPatch) -> None:
+    def after_write(volume: ubi.Volume, size: int | None = None) -> str:
+        path = device.saved.get(volume.name)
+        if path is None:
+            return "0" * 64
+        data = path.read_bytes()
+        if size is not None:
+            data = data[:size]
+        return hashlib.sha256(data).hexdigest()
+
+    monkeypatch.setattr(device, "remote_digest", after_write)
+
+
 @pytest.mark.parametrize(
     "problem",
     [
         "wrong-device",
+        "old-bundle",
         "unknown-image",
         "missing",
         "symlink",
@@ -155,6 +193,8 @@ def test_bundle_rejected_before_usb(  # ruff: ignore[complex-structure]
     image = bundle.image("access")
     if problem == "wrong-device":
         report["serial"] = "WRONG"
+    elif problem == "old-bundle":
+        report.pop("adb")
     elif problem == "unknown-image":
         report["images"]["tee1"] = {}
     elif problem == "missing":
@@ -322,6 +362,40 @@ def test_initial_staging_checks_all_capacities_before_writing(
     assert len(link.actions) == 1
 
 
+def test_partial_b_flash_keeps_bcb_on_a(bundle: cannoli.Bundle) -> None:
+    device, link = Device(bundle), Link()
+    count = [0]
+
+    def check() -> None:
+        count[0] += 1
+        if count[0] == 1:
+            raise FatalError(message="Boot Cannoli slot B TWRP first")
+
+    device.check = check
+
+    original_fastboot = link.fastboot
+
+    def failing_fastboot(*args: object) -> None:
+        original_fastboot(*args)
+        if args[:2] == ("flash", "uboot_b"):
+            raise FatalError(message="fastboot flash failed")
+
+    link.fastboot = failing_fastboot
+
+    with pytest.raises(FatalError, match="fastboot flash failed"):
+        cannoli.start_recovery(bundle, link, device)
+
+    assert ("flash", "boot_b", str(bundle.image("boot_b"))) in link.actions
+    assert ("ram", "select-a", "cannoli-bcb-1") in link.actions
+    bcb_index = link.actions.index(("ram", "select-a", "cannoli-bcb-1"))
+    flash_boot_index = next(
+        i for i, a in enumerate(link.actions) if a[:2] == ("flash", "boot_b")
+    )
+    assert bcb_index < flash_boot_index
+    assert not any(action[:2] == ("ram", "select-b") for action in link.actions)
+    assert ("reboot",) not in link.actions
+
+
 def test_partial_backup_refused_before_writes(
     bundle: cannoli.Bundle, rig: tuple[Device, Link], tmp_path: pathlib.Path
 ) -> None:
@@ -471,11 +545,11 @@ def test_unlock_orders_backup_writes_and_slot_selection(
 @pytest.mark.parametrize(
     "case",
     [
-        ("ro.adb.secure", "0", "authentication"),
+        ("ro.adb.secure", "1", "authentication"),
         ("ro.boot.slot_suffix", "_b", "Slot A did not boot"),
     ],
 )
-def test_unlock_rejects_insecure_or_wrong_slot_boot(
+def test_unlock_rejects_authenticated_or_wrong_slot_boot(
     bundle: cannoli.Bundle,
     rig: tuple[Device, Link],
     tmp_path: pathlib.Path,
@@ -496,6 +570,188 @@ def test_unlock_rejects_insecure_or_wrong_slot_boot(
         invoke(bundle, tmp_path)
 
 
+def test_upgrade_asks_before_writing(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+    asked = []
+
+    def record(**what: object) -> None:
+        asked.append(what)
+        asked.append(list(device.actions))
+
+    monkeypatch.setattr(cannoli, "confirm", record)
+    invoke_upgrade(bundle, parts, force=False)
+    assert asked
+    assert "eFuse" in asked[0]["what"]
+    assert "stage_helper" not in asked[1]
+    assert not [action for action in asked[1] if action[:1] == ("write",)]
+
+
+def test_upgrade_check_reports_without_writing(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+    invoke_upgrade(bundle, parts, check=True)
+    assert "check" in device.actions
+    assert not [action for action in device.actions if action[:1] == ("write",)]
+
+
+def test_upgrade_counts_an_interrupted_volume_as_stale(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+    original = device.volumes
+
+    def with_updating_tee1() -> dict[str, ubi.Volume]:
+        volumes = original()
+        if "tee1" not in device.saved:
+            volumes["tee1"] = ubi.Volume("tee1", "/dev/ubi0_x", 2000000, 2000000, 1)
+        return volumes
+
+    device.volumes = with_updating_tee1
+    invoke_upgrade(bundle, parts)
+    assert "tee1" in device.saved
+
+
+def test_upgrade_refuses_a_unit_with_missing_volumes(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    original = device.volumes
+
+    def without_scp_b() -> dict[str, ubi.Volume]:
+        volumes = original()
+        volumes.pop("scp_b")
+        return volumes
+
+    device.volumes = without_scp_b
+    with pytest.raises(FatalError, match="missing on this unit"):
+        invoke_upgrade(bundle, parts)
+    assert device.actions == ["check"]
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["hash", "boot", "empty-system", "oversize-system", "missing"],
+)
+def test_upgrade_rejects_wrong_or_missing_parts(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    problem: str,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    if problem == "hash":
+        (parts / "scp.img").write_bytes(b"2022-launch-scp")
+    elif problem == "boot":
+        (parts / "boot.img").write_bytes(b"2022-launch-boot")
+    elif problem == "empty-system":
+        (parts / "system.img").write_bytes(b"")
+    elif problem == "oversize-system":
+        (parts / "system.img").write_bytes(b"hsqs" + b"0" * 2000000)
+    else:
+        (parts / "tee2.img").unlink()
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    with pytest.raises(FatalError, match=r"differs|missing|not a stock|exceeds"):
+        invoke_upgrade(bundle, parts)
+    if problem == "oversize-system":
+        assert device.actions == ["check"]
+    else:
+        assert device.actions == []
+
+
+def test_upgrade_sees_a_padded_volume_as_8349(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+    for name in cannoli.PREREQUISITES:
+        device.saved[name] = parts / cannoli.UPGRADE_PARTS[name]
+    with pytest.raises(FatalError, match="already"):
+        invoke_upgrade(bundle, parts)
+    assert not [action for action in device.actions if action[:1] == ("write",)]
+
+
+def test_upgrade_writes_nine_volumes_in_order_and_rechecks(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+    invoke_upgrade(bundle, parts)
+    writes = [action for action in device.actions if action[:1] == ("write",)]
+    assert [name for _, name in writes] == [
+        "system_a",
+        "boot_a",
+        "uboot_a",
+        "mcupm_a",
+        "mcupm_b",
+        "scp_a",
+        "scp_b",
+        "tee1",
+        "tee2",
+    ]
+    assert "stage_helper" in device.actions
+    assert device.saved["mcupm_b"].name == "mcupm.img"
+    assert device.saved["scp_b"].name == "scp.img"
+
+
+def test_upgrade_writes_nothing_when_declined(
+    bundle: cannoli.Bundle,
+    rig: tuple[Device, Link],
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prereqs, parts = upgrade_parts(bundle, tmp_path)
+    monkeypatch.setattr(cannoli, "PREREQUISITES", prereqs)
+    device, _link = rig
+    on_2022_firmware(device, monkeypatch)
+
+    def declined(**_what: object) -> None:
+        raise FatalError(message="declined")
+
+    monkeypatch.setattr(cannoli, "confirm", declined)
+    with pytest.raises(FatalError, match="declined"):
+        invoke_upgrade(bundle, parts, force=False)
+    assert "stage_helper" not in device.actions
+    assert not [action for action in device.actions if action[:1] == ("write",)]
+
+
 def test_wait_recovery_has_deadline(
     monkeypatch: pytest.MonkeyPatch, bundle: cannoli.Bundle
 ) -> None:
@@ -512,43 +768,6 @@ def test_wait_recovery_has_deadline(
         cannoli.wait_recovery(device)
 
 
-def test_partial_b_flash_keeps_bcb_on_a(
-    bundle: cannoli.Bundle,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    device, link = Device(bundle), Link()
-    count = [0]
-
-    def check() -> None:
-        count[0] += 1
-        if count[0] == 1:
-            raise FatalError(message="Boot Cannoli slot B TWRP first")
-
-    device.check = check
-
-    original_fastboot = link.fastboot
-
-    def failing_fastboot(*args: object) -> None:
-        original_fastboot(*args)
-        if args[:2] == ("flash", "uboot_b"):
-            raise FatalError(message="fastboot flash failed")
-
-    link.fastboot = failing_fastboot
-
-    with pytest.raises(FatalError, match="fastboot flash failed"):
-        cannoli.start_recovery(bundle, link, device)
-
-    assert ("flash", "boot_b", str(bundle.image("boot_b"))) in link.actions
-    assert ("ram", "select-a", "cannoli-bcb-1") in link.actions
-    bcb_index = link.actions.index(("ram", "select-a", "cannoli-bcb-1"))
-    flash_boot_index = next(
-        i for i, a in enumerate(link.actions) if a[:2] == ("flash", "boot_b")
-    )
-    assert bcb_index < flash_boot_index
-    assert not any(action[:2] == ("ram", "select-b") for action in link.actions)
-    assert ("reboot",) not in link.actions
-
-
 def test_write_failure_never_selects_a(
     bundle: cannoli.Bundle, rig: tuple[Device, Link], tmp_path: pathlib.Path
 ) -> None:
@@ -558,3 +777,24 @@ def test_write_failure_never_selects_a(
         invoke(bundle, tmp_path)
     assert "uboot_a" not in device.saved
     assert not any(action[:2] == ("ram", "select-a") for action in link.actions)
+
+
+def upgrade_parts(
+    bundle: cannoli.Bundle, tmp_path: pathlib.Path
+) -> tuple[dict[str, tuple[int, str]], pathlib.Path]:
+    prereqs = {}
+    directory = tmp_path / "parts"
+    directory.mkdir()
+    for name, file in (
+        ("mcupm_a", "mcupm.img"),
+        ("scp_a", "scp.img"),
+        ("tee1", "tee1.img"),
+        ("tee2", "tee2.img"),
+    ):
+        path = directory / file
+        path.write_bytes(b"8349-" + file.encode())
+        prereqs[name] = (path.stat().st_size, ubi.digest(path))
+    (directory / "boot.img").write_bytes(bundle.image("boot_a").read_bytes())
+    (directory / "system.img").write_bytes(b"hsqs-system")
+    (directory / "uboot.img").write_bytes(b"\xd0\x0d\xfe\xed-uboot")
+    return prereqs, directory

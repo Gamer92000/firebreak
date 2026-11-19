@@ -21,6 +21,11 @@
 
 ## Windows
 
+- From inside WSL the Cannoli preloader cannot be caught: its USB window is
+  shorter than a second, and usbipd-win attaches too late and loses the
+  binding again on the next power cycle. Run the whole Cannoli install
+  natively on Windows instead, with adb and fastboot on PATH; pyserial then
+  opens the preloader as a COM port through usbser.sys.
 - The drivers have x86 and x64 builds only, so on Windows on ARM the steps
   that use fastboot or the bootrom cannot run.
 - UsbDk has run on Windows 11 23H2. mtkclient reports it broken on 25H2

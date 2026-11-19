@@ -107,6 +107,15 @@ def test_survey_takes_options_before_it(*, tmp_path: pathlib.Path) -> None:
         (["report", "--force"], "unrecognized arguments: --force"),
         (["report", "8149"], "unrecognized arguments: 8149"),
         (["--factory-reset", "write-test"], "write-test takes no --factory-reset"),
+        (["cannoli-upgrade"], "Cannoli requires --bundle and --serial"),
+        (
+            ["cannoli-upgrade", "--bundle", "x", "--serial", "S"],
+            "cannoli-upgrade requires --ota-parts",
+        ),
+        (
+            ["cannoli-upgrade", "--device", "radar"],
+            "cannoli-upgrade takes only --device cannoli",
+        ),
     ],
 )
 def test_the_positional_arguments_are_checked(

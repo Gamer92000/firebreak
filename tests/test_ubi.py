@@ -176,28 +176,26 @@ def test_remote_hash_checks_count_and_update_marker(
     recovery: ubi.Recovery, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     volume = inventory()["system_a"]
+    commands = []
     monkeypatch.setattr(
         recovery,
         "shell",
-        lambda command: "" if "head -c" in command and ">" in command
-        else f"4\n{'a' * 64}  -",
+        lambda command: commands.append(command) or f"4\n{'a' * 64}  -",
     )
     assert recovery.remote_digest(volume) == "a" * 64
+    assert len(commands) == 1
+    assert ">" not in commands[0]
+    assert "|" in commands[0]
+    assert "pipefail" in commands[0]
     with pytest.raises(FatalError):
         recovery.remote_digest(volume, 101)
-    monkeypatch.setattr(
-        recovery,
-        "shell",
-        lambda command: "" if "head -c" in command and ">" in command else "3\nbad",
-    )
+    monkeypatch.setattr(recovery, "shell", lambda _: "3\nbad")
     with pytest.raises(FatalError, match="Truncated"):
         recovery.remote_digest(volume)
-    monkeypatch.setattr(
-        recovery,
-        "shell",
-        lambda command: "" if "head -c" in command and ">" in command
-        else f"4\nnot-a-hash",
-    )
+    monkeypatch.setattr(recovery, "shell", lambda _: "4")
+    with pytest.raises(FatalError, match="Truncated"):
+        recovery.remote_digest(volume)
+    monkeypatch.setattr(recovery, "shell", lambda _: "4\nnot-a-hash")
     with pytest.raises(FatalError, match="checksum"):
         recovery.remote_digest(volume)
 
