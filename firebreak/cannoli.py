@@ -38,19 +38,31 @@ LIMITS = {
 PREREQUISITES = {
     "mcupm_a": (
         122880,
-        "37857df6481383e0a2a69d1e4e27935cb64f5b1df17fa5f74b77ab647c8dcaed",
+        (
+            "37857df6481383e0a2a69d1e4e27935cb64f5b1df17fa5f74b77ab647c8dcaed",
+            "34a6616b9c8c80ec8351d64214b9910dae78865c39cd379515a415ea9ae3ee60",
+        ),
     ),
     "scp_a": (
         1028096,
-        "e241c5c3faa563efd48dd6a2361d4a1b04ecf9faecf4fc73d6ba5d0f505d20ba",
+        (
+            "e241c5c3faa563efd48dd6a2361d4a1b04ecf9faecf4fc73d6ba5d0f505d20ba",
+            "79332b506f031418d0db06f31ad809be21a022d97833047ca2a05f4c588b5fa5",
+        ),
     ),
     "tee1": (
         647168,
-        "b3be918bb0e3dd74e5e7b436809bfd83b9667e9ce58c0081e29aa8d78e7199d6",
+        (
+            "b3be918bb0e3dd74e5e7b436809bfd83b9667e9ce58c0081e29aa8d78e7199d6",
+            "05d4f64defb7bc528bc69945acab41f4974ee0fb6d4fc8e54b8e561584ce2296",
+        ),
     ),
     "tee2": (
         647168,
-        "b3be918bb0e3dd74e5e7b436809bfd83b9667e9ce58c0081e29aa8d78e7199d6",
+        (
+            "b3be918bb0e3dd74e5e7b436809bfd83b9667e9ce58c0081e29aa8d78e7199d6",
+            "05d4f64defb7bc528bc69945acab41f4974ee0fb6d4fc8e54b8e561584ce2296",
+        ),
     ),
 }
 STOCK_BOOT = "548dd73848cfcc76cb921ec5d8c68438c95886f4fc7187da9fa5f4b7efb8b201"
@@ -138,11 +150,11 @@ class Transport:
 
 
 def carries_8349(recovery: Recovery, volume: Volume) -> bool:
-    size, checksum = PREREQUISITES[volume.name]
+    size, checksums = PREREQUISITES[volume.name]
     return (
         not volume.updating
         and volume.used >= size
-        and recovery.remote_digest(volume, size) == checksum
+        and recovery.remote_digest(volume, size) in checksums
     )
 
 
@@ -211,12 +223,12 @@ def preflight(bundle: Bundle, recovery: Recovery) -> dict[str, Volume]:
     require(
         set(PREREQUISITES).issubset(volumes), "8349 prerequisite volumes are missing"
     )
-    for name, (size, checksum) in PREREQUISITES.items():
+    for name, (size, checksums) in PREREQUISITES.items():
         require(
-            recovery.remote_digest(volumes[name], size) == checksum,
+            recovery.remote_digest(volumes[name], size) in checksums,
             "Unsupported firmware prerequisite: "
             + name
-            + "; cannoli-upgrade brings a 2022 unit up to 8349",
+            + "; cannoli-upgrade brings an older unit up to 8349",
         )
     for name in B_VOLUMES:
         image = bundle.image(name)
@@ -403,7 +415,7 @@ def upgrade_prerequisites(
     if check:
         for name in sorted(PREREQUISITES):
             say(
-                text=name + ": " + ("2022 launch firmware" if name in stale else "8349")
+                text=name + ": " + ("older firmware" if name in stale else "8349")
             )
         passed(
             message=str(len(stale))
@@ -447,8 +459,9 @@ def verify_upgrade_parts(parts: dict[str, pathlib.Path]) -> None:
     }
     for name, image in parts.items():
         if name in pins:
+            size, checksums = pins[name]
             require(
-                (image.stat().st_size, digest(image)) == pins[name],
+                image.stat().st_size == size and digest(image) in checksums,
                 "OTA part differs from the pinned 8349 image: " + image.name,
             )
         elif name == "boot_a":
