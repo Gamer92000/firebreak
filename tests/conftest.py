@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import struct
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import pytest
 
 from firebreak import cache, fireos, host, identify, ui
 from firebreak.devices import BISCUIT, DEFAULTS, TARGETS
-from firebreak.mediatek import gcpu, usbdl
+from firebreak.mediatek import fit, gcpu, usbdl
 
 if TYPE_CHECKING:
     import pathlib
@@ -19,6 +20,25 @@ if TYPE_CHECKING:
 
 ADB_KEY = b"QAAAAtest firebreak@host\n"
 DEFINED = {(usbdl, "mediatek_ports")}
+FIT_D = int(
+    "83770612396893488838889438817013918313809550743219158826828690993812"
+    "92350090659397015507055124710652947017246673198294047459090107605226"
+    "45013116269689105172073868639193040718301235241974921220674450526607"
+    "84654835792058370002761561948787205916821083585250472839084646250945"
+    "0862060457665285241872163733877313"
+)
+FIT_HEADER = 56
+FIT_KEY = (
+    int(
+        "16738032392241489567177735218751954769915050387373030524493511956"
+        "2851145349966934421404050570642732336033130882689450182008636094018"
+        "94016032385549075187467729241533652745816241945448785212619022105898"
+        "47207055260467266709451174045640168822362757377415942381331013848133"
+        "46422592828787885490362930001966009687239"
+    ),
+    65537,
+)
+FIT_SALT = b"firebreak's test salt" + bytes(11)
 REAL_USB_DEVICES = identify.usb_devices
 
 
@@ -99,6 +119,61 @@ class FakePort:
     def write(self, *, data: bytes) -> int:
         self.written += data
         return len(data)
+
+
+class FitTree:
+    def __init__(self) -> None:
+        self.body = bytearray()
+        self.strings = bytearray(b"\0")
+
+    def begin(self, name: str) -> None:
+        self.body += struct.pack(">I", fit.BEGIN_NODE) + name.encode() + b"\0"
+        self.pad()
+
+    def end(self) -> None:
+        self.body += struct.pack(">I", fit.END_NODE)
+
+    def image(self) -> bytes:
+        strings_at = FIT_HEADER + len(self.body) + 4
+        return (
+            struct.pack(
+                ">10I",
+                fit.FIT_MAGIC,
+                strings_at + len(self.strings),
+                FIT_HEADER,
+                strings_at,
+                40,
+                17,
+                16,
+                0,
+                len(self.strings),
+                len(self.body) + 4,
+            )
+            + bytes(16)
+            + self.body
+            + struct.pack(">I", fit.END)
+            + self.strings
+        )
+
+    def nop(self) -> None:
+        self.body += struct.pack(">I", fit.NOP)
+
+    def pad(self) -> None:
+        self.body += b"\0" * (-len(self.body) % 4)
+
+    def prop(self, name: str, value: bytes) -> int:
+        at = FIT_HEADER + len(self.body) + 12
+        self.body += struct.pack(">III", fit.PROP, len(value), self.text(name)) + value
+        self.pad()
+        return at
+
+    def text(self, name: str) -> int:
+        data = name.encode() + b"\0"
+        at = self.strings.find(data)
+        if at < 0:
+            at = len(self.strings)
+            self.strings += data
+        return at
 
 
 @pytest.fixture(autouse=True)
@@ -197,6 +272,61 @@ def clear_replies() -> bytes:
         )
         + clear_input_replies()
     )
+
+
+def fit_image(payload: bytes, *, private: int = FIT_D, stock: bytes) -> bytes:
+    tree = FitTree()
+    tree.begin("")
+    tree.begin("images")
+    for node, data in (("kernel-1", payload), ("archive/kernel-1", stock)):
+        if node == "archive/kernel-1":
+            tree.begin("archive")
+        tree.begin("kernel-1")
+        tree.prop("description", b"u-boot\0")
+        tree.prop("data", data)
+        tree.begin("hash-1")
+        tree.prop("algo", b"sha256\0")
+        tree.prop("value", hashlib.sha256(data).digest())
+        tree.end()
+        tree.end()
+    tree.end()
+    tree.end()
+    tree.begin("configurations")
+    tree.begin("conf-1")
+    tree.prop("kernel-1", b"kernel-1\0")
+    tree.begin("signature-1")
+    tree.prop("algo", b"sha256,rsa2048\0")
+    tree.prop("key-name-hint", b"dev\0")
+    tree.prop("hashed-nodes", b"/images/archive/kernel-1\0")
+    tree.prop("hashed-strings", struct.pack(">II", 0, len(tree.strings)))
+    length = FIT_KEY[0].bit_length() // 8
+    at = tree.prop("value", bytes(length))
+    tree.end()
+    tree.end()
+    tree.end()
+    tree.end()
+    image = bytearray(tree.image())
+    stream = fit.Fit(image).signed_stream(fit.SIGNATURE)
+    digest = hashlib.sha256(b"\0" * 8 + hashlib.sha256(stream).digest() + FIT_SALT)
+    room = length - 34 - len(FIT_SALT)
+    data = bytes(room) + b"\x01" + FIT_SALT
+    mask = bytearray()
+    while len(mask) < len(data):
+        mask += hashlib.sha256(
+            digest.digest() + (len(mask) // 32).to_bytes(4, "big")
+        ).digest()
+    masked = bytearray(a ^ b for a, b in zip(data, mask))
+    masked[0] &= 0x7F
+    encoded = bytes(masked) + digest.digest() + b"\xbc"
+    signature = pow(int.from_bytes(encoded, "big"), private, FIT_KEY[0]).to_bytes(
+        length, "big"
+    )
+    image[at : at + length] = signature
+    return bytes(image)
+
+
+def fit_stream(image: bytes) -> str:
+    return hashlib.sha256(fit.Fit(image).signed_stream(fit.SIGNATURE)).hexdigest()
 
 
 def function_replies(*, status: int) -> bytes:

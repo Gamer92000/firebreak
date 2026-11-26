@@ -16,6 +16,14 @@ This project adheres to [Semantic Versioning](https://semver.org).
   key is refused before anything is written. `cannoli-upgrade` brings a
   factory unit on the 2022 launch firmware up to the 8349 volumes first. The
   guide, `docs/cannoli.md`, also covers Windows hosts.
+- `unlock --device laser` roots an Echo (4th Generation) on NS6575/8349: it
+  RAM-loads a sealed loader through the preloader's USB window, rehearses
+  the rescue move with nothing written, then writes the rooted system,
+  the stock boot image and the verity-gated loader to slot B as sparse
+  pieces and selects the slot last. Slot A stays stock. Each loader image
+  is checked for a fresh seal, the stock signature and the bytes that ran
+  on hardware before USB is touched. `--select-a` selects stock slot A
+  again, the undo and the rescue. The guide is `docs/laser.md`.
 
 ### Fixed
 

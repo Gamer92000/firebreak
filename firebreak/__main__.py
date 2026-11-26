@@ -18,7 +18,7 @@ import sys
 import textwrap
 from typing import TYPE_CHECKING
 
-from firebreak import __version__, cannoli
+from firebreak import __version__, cannoli, laser
 from firebreak.backup import backup
 from firebreak.cache import make_cache
 from firebreak.devices import (
@@ -30,6 +30,7 @@ from firebreak.devices import (
     biscuit,
 )
 from firebreak.devices.cannoli import CANNOLI
+from firebreak.devices.laser import LASER
 from firebreak.emos import child_emos
 from firebreak.entry import (
     BOOTROM,
@@ -101,7 +102,7 @@ mtkclient, by bkerler, agrees with two of firebreak's bootrom addresses.
   https://github.com/bkerler/mtkclient
 ftvdb keeps an archive of Fire OS builds.
   https://ftvdb.com/"""
-DEVICES = {device.name: device for device in (*TARGETS, CANNOLI)}
+DEVICES = {device.name: device for device in (*TARGETS, CANNOLI, LASER)}
 FACTORY_RESETS = {
     name
     for targets in TARGETS.values()
@@ -120,10 +121,18 @@ WRITE_TEST = "write-test"
 
 def add_cannoli_options(parser: argparse.ArgumentParser, name: str) -> None:
     if name in {UNLOCK, RESTORE, UPGRADE}:
-        parser.add_argument("--bundle", help="Cannoli image bundle", type=pathlib.Path)
-        parser.add_argument("--serial", help="Cannoli USB serial")
         parser.add_argument(
-            "--check", action="store_true", help="Cannoli read-only recovery checks"
+            "--bundle",
+            help="image bundle (with --device cannoli or laser)",
+            type=pathlib.Path,
+        )
+        parser.add_argument(
+            "--serial", help="USB serial (with --device cannoli or laser)"
+        )
+        parser.add_argument(
+            "--check",
+            action="store_true",
+            help="read-only checks (with --device cannoli or laser)",
         )
         if name == UPGRADE:
             parser.add_argument(
@@ -136,6 +145,13 @@ def add_cannoli_options(parser: argparse.ArgumentParser, name: str) -> None:
                 "--backup",
                 help="new Cannoli host backup directory",
                 type=pathlib.Path,
+            )
+            parser.add_argument(
+                "--select-a",
+                action="store_true",
+                help="Laser: write the boot-control block that selects stock slot A"
+                " again, the undo of an install and the way back when slot B does"
+                " not boot",
             )
 
 
@@ -366,6 +382,8 @@ def builds_list() -> str:
 def cannoli_options(
     parser: argparse.ArgumentParser, options: argparse.Namespace
 ) -> bool:
+    if options.select_a and options.device != "laser":
+        parser.error("--select-a needs --device laser")
     if options.device == "cannoli":
         if options.command not in {UNLOCK, RESTORE, UPGRADE}:
             parser.error(
@@ -385,7 +403,7 @@ def cannoli_options(
         getattr(options, name, None)
         for name in ("bundle", "check", "ota_parts", "serial", "backup")
     ):
-        parser.error("Cannoli options require --device cannoli")
+        parser.error("Bundle options require --device cannoli or laser")
     return False
 
 
@@ -437,7 +455,7 @@ def chosen_device(*, name: str | None) -> Device | None:
     return bootrom_device()
 
 
-def cli() -> None:
+def cli() -> None:  # ruff: ignore[complex-structure]
     options = parsed()
     if options.command == BUILDS_COMMAND:
         print(builds_list())
@@ -466,6 +484,9 @@ def cli() -> None:
     SESSION.device = DEVICES.get(options.device)
     if options.device == "cannoli":
         cannoli_run(options)
+        return
+    if options.device == "laser":
+        laser_run(options)
         return
     command = {
         BACKUP: functools.partial(
@@ -515,6 +536,30 @@ def imply_cannoli(parser: argparse.ArgumentParser, options: argparse.Namespace) 
     if options.device not in {None, "cannoli"}:
         parser.error("cannoli-upgrade takes only --device cannoli")
     options.device = "cannoli"
+
+
+def laser_options(parser: argparse.ArgumentParser, options: argparse.Namespace) -> bool:
+    if options.device == "laser":
+        if options.command != UNLOCK:
+            parser.error("Laser supports unlock only; see docs/laser.md")
+        if not options.bundle or not options.serial:
+            parser.error("Laser requires --bundle and --serial")
+        if options.target or options.factory_reset:
+            parser.error("Laser takes no TARGET or --factory-reset")
+        if options.command == UNLOCK and options.backup:
+            parser.error("Laser needs no --backup; slot A stays stock")
+        return True
+    return False
+
+
+def laser_run(options: argparse.Namespace) -> None:
+    laser.run(
+        bundle_dir=options.bundle,
+        check=options.check,
+        force=options.force,
+        select_a=options.select_a,
+        serial=options.serial,
+    )
 
 
 def leave(*, status: object) -> None:
@@ -620,7 +665,7 @@ def option_parents(*, hidden: bool = False) -> dict[str, argparse.ArgumentParser
         choices=DEVICES,
         help=argparse.SUPPRESS
         if hidden
-        else "choose cannoli for its NAND route, "
+        else "choose cannoli or laser for their own routes, "
         "or choose a device for short. "
         "Other commands identify the connected Echo. One of: " + ", ".join(DEVICES),
     )
@@ -652,6 +697,7 @@ def parsed() -> argparse.Namespace:
         ("no_update_check", False),
         ("no_wait", False),
         ("ota_parts", None),
+        ("select_a", False),
         ("target", None),
         ("verbose", False),
     ):
@@ -673,7 +719,9 @@ def parsed() -> argparse.Namespace:
         TWRP: {"force"},
         WRITE_TEST: set(),
     }.get(options.command, {"factory_reset"})
-    if cannoli_options(parser, options):
+    if laser_options(parser, options):
+        takes = {"device", "force"}
+    elif cannoli_options(parser, options):
         takes = {"device", "force"}
         if options.command == RESTORE:
             takes.add("end_in_fireos")
@@ -794,6 +842,11 @@ def target_help() -> str:
         ),
         "      Root slot A and install TWRP in slot B. See docs/cannoli.md",
         "      to build the required local image bundle.",
+        "",
+        "commands for the Amazon Echo (4th Generation), Laser 8349:",
+        "  unlock --device laser --bundle DIRECTORY --serial SERIAL",
+        "      Root slot B through a RAM-booted access loader; slot A stays",
+        "      stock. See docs/laser.md to build the required local image bundle.",
     ])
     return "\n".join(lines)
 

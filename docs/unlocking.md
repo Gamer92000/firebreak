@@ -3539,3 +3539,110 @@ Upstream source licenses and notices remain with their respective projects.
 
 [cannoli-os-builder]: https://github.com/Gamer92000/cannoli-os-builder
 [twrp_device_amazon_cannoli]: https://github.com/Gamer92000/twrp_device_amazon_cannoli
+
+### Laser
+
+Laser is an eMMC A/B device whose stock loader refuses to start a system
+it has not verified and whose fastboot is locked. `unlock --device laser`
+RAM-loads a sealed, patched loader through the preloader's USB window and
+writes slot B through its fastboot. Slot A is never addressed.
+[The Laser guide](laser.md) has the commands and opens with what bricks an
+Echo and the rules that keep a run clear of it. In `firebreak/laser.py`
+each of those rules is a check rather than a promise.
+
+**The seal.** U-Boot's FIT signature leaves an image's `data` out of the
+signed stream ([CVE-2026-46728][laser-cve]), so a sealed loader can be
+patched and still verify while its `hash-1` goes stale. The preloader refuses exactly
+that, after a correct checksum. So before USB is touched, the route checks
+each loader three ways. `sha256(data)` equals `hash-1`. The signed stream
+equals the stock loader's and verifies under Amazon's key, which covers
+everything about the image except the payload and its hash. And the whole
+file equals the one that ran on hardware, which covers the payload. The
+pins are `LOADERS`, `STOCK_STREAM`, `KEY` and `STOCK_BOOT`. `access` is
+uploaded, so the preloader gives a verdict of its own besides. `verity` is
+only written, so the seal and the pin are all that stand between it and
+the partition.
+
+**A RAM loader is never asked to boot.** A loader that arrives over the
+download port only ever sits in fastboot. Asked to boot, or sent
+`reboot`, it hangs and the watchdog resets the Echo about 30 s later
+(2026-11-26: 31.7, 31.8 and 31.8 s for three images; `do_reset` is a PSCI
+`SMC`, and the secure monitor that call needs is most likely missing, an
+inference from the timing). So no `reboot` is sent after a write: the
+route ends with a power prompt instead. The same reset is what makes the
+rescue rehearsal safe to practise on every run. The catcher starts
+waiting for the next window before `reboot` is sent, the watchdog supplies
+the reset, and the window after it is given the loader again. Only when
+that has worked does the route go on to write. If the Echo is still in
+fastboot once `reboot` has returned and no window was caught, the
+rehearsal stops at once instead of waiting out its ten minutes. A reset is
+also what an Echo does whose slot does not boot, which is why catching the
+window after one is the rescue move.
+
+**The window.** `0e8d:2000` appears for about 1.3 s at each power-on and
+reset. Its tty node cannot be opened for its first ~100 ms, so opening is
+retried for up to 0.9 s. Each port incarnation gets one upload: the start
+byte is sent up to six times inside the window, and every other exchange
+waits half a second, three for the checksum. A port left behind by a
+refused image stays listed and answers nothing, so a port that is present
+when the wait begins is ignored until it has gone once. A listener that
+finds the port already there was started too late, and a fresh window that
+appears under 0.25 s after the listener began belongs to an Echo that was
+powered on too early; both stop the run before anything is sent.
+
+**Recognising the loader.** `fastboot devices` lists the access loader in RAM
+under its serial with the name of its USB interface, `Android Fastboot`, where a
+stock fastboot is listed as `fastboot`. The route looks for the serial, never
+for the second word: its first run on hardware (2026-11-26, `--check`) waited
+twenty seconds for a line ending in `fastboot` and reported the loader missing
+while it sat in fastboot.
+
+**Pieces, not one image.** The loader takes at most `0x1e00000` bytes per
+download and starts every download at the start of the partition. Its
+sparse writer was read from the stock U-Boot: a `RAW` chunk writes its
+blocks, `FILL` writes a four-byte value 512 KiB at a time, `DONT_CARE`
+calls the erase callback, which is `mov x0, x2; ret` and erases nothing,
+and the offset moves on. So the system image travels as pieces that each
+fit one download: a sparse header, a `DONT_CARE` chunk up to the piece's
+first block, then `FILL` chunks for zero blocks and `RAW` chunks for the
+rest. `firebreak/sparse.py` proves of any image that the pieces put it
+back byte for byte and write every block exactly once, and the route runs
+that proof on the bundle before USB is touched. Nothing records which
+pieces are on the Echo, so every run writes all ten: skipping one on a
+remembered checksum could leave a stale block in place after an update
+wrote the slot.
+
+**The order.** `boot_b`, `uboot_b`, `system_b`, `misc`. Nothing written
+matters to a boot until `misc` selects slot B, so `misc` is last and the
+route stops at the first failed write. `Transport.flash` refuses any
+partition outside those four, so slot A, the preloader, `lk`, the TEE
+partitions and `recovery` cannot be reached by the route at all.
+`uboot_b` gets the builder's `verity.img` and not the stock loader because
+the stock one answers "enforcing" for dm-verity on a retail unit and will
+not start a rooted system.
+
+**The block.** The LK reads its slot decision from the end of the first
+0x368 bytes of `misc`: magic `0x42424100`, an init byte, then one flags
+byte per slot, slot B at 0x365 and slot A at 0x366. The low nibble is the
+inverted priority (0xE is selected), bits 4 to 6 the tries, bit 7
+successful. The route writes `0xBE` for the selected slot and `0xBF` for
+the other: selected or not, three tries, both successful. Fastboot reports
+`misc` as 0x80000 bytes and the kernel's table gives the partition 1024;
+the block lies well inside both.
+
+**Undo and rescue.** `--select-a` loads the access loader the same way and
+writes only the `misc` block with slot A selected. Slot A is untouched
+stock, so that one write is a complete return. With `--check` it writes
+nothing.
+
+**Measured on one unit on 8349, 2026-11-26.** Sealed uploads accepted, 8
+of 8; unsealed ones refused after a correct checksum, 3 of 3. Ten pieces,
+about 308 MB of downloads, wrote the 1 GB system. Slot B booted from a
+cold start and after `adb reboot`; root USB adb enumerated by itself about
+29 s after the reboot (`1949:02c8`, the stock USB rc brings the gadget
+up). The stock `recovery` partition is 16 MiB of zeros. The first writes were
+made by the day's stage tools, which this route reproduces; the route
+itself ran end to end the same day, its check with the rescue rehearsal
+and then its thirteen writes, on a unit that booted the result.
+
+[laser-cve]: https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/46xxx/CVE-2026-46728.json

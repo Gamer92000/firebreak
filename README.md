@@ -5,7 +5,9 @@ Generation) or an Echo Dot (3rd Generation) over USB, or returns it to stock.
 Run it again with another target to move the device. A stopped run picks up
 where it left off. It also roots an Echo Dot (5th Generation), Cannoli on
 NS6575/build 8349, over a separate NAND path; see
-[the Cannoli guide](docs/cannoli.md).
+[the Cannoli guide](docs/cannoli.md). It also roots an Amazon Echo (4th
+Generation), Laser on the same build, by RAM-loading a patched loader
+through the preloader's USB window; see [the Laser guide](docs/laser.md).
 
 > [!NOTE]
 > The biscuit, radar, and donut unlocks build on Rortiz2's work.
@@ -187,6 +189,11 @@ commands for the Echo Dot (5th Generation), Cannoli 8349:
   unlock --device cannoli --bundle DIRECTORY --serial SERIAL --backup DIRECTORY
       Root slot A and install TWRP in slot B. See docs/cannoli.md
       to build the required local image bundle.
+
+commands for the Amazon Echo (4th Generation), Laser 8349:
+  unlock --device laser --bundle DIRECTORY --serial SERIAL
+      Root slot B through a RAM-booted access loader; slot A stays
+      stock. See docs/laser.md to build the required local image bundle.
 
 Run it again with another of these to move the Echo there.
 

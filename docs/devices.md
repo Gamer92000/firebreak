@@ -477,3 +477,16 @@ of this repository's eMMC routes and no `survey`: two separate builder
 repositories produce its recovery and bundle, and `unlock --device cannoli`
 installs them. [cannoli.md](cannoli.md) is its guide, and the 2022 launch
 firmware a factory unit may carry has its own section there.
+
+## laser
+
+The Echo (4th Generation), model L4S3RE, `ro.product.device` `laser` and
+`ro.product.model` `AEOLS`, on an MT8512 with kernel 4.9.77. The one OTA
+on its FTVDB record is NS6575/8349, Fire OS 6.5.7.5, dated 2026-10-27. Its
+firmware is an ext4 system-as-root image on eMMC, with A/B slots of `boot`,
+`system` and `uboot`, a `misc` that holds the boot-control block, and a
+16 MiB `recovery` partition that stock leaves empty. It takes none of this
+repository's eMMC routes and no `survey`: laser-os-builder makes its
+bundle, and `unlock --device laser` writes slot B through a loader RAM-loaded
+over the preloader's USB window. [laser.md](laser.md) is its guide; it opens
+with how a wrong loader image bricks the Echo.
